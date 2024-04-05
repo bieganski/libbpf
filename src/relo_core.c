@@ -910,8 +910,14 @@ static int bpf_core_calc_relo(const char *prog_name,
 		if (res->orig_sz != res->new_sz) {
 			const struct btf_type *orig_t, *new_t;
 
+			// goto done;
+			// exit(1);
+
 			orig_t = btf_type_by_id(local_spec->btf, res->orig_type_id);
 			new_t = btf_type_by_id(targ_spec->btf, res->new_type_id);
+
+			printf("MATEUSZ: size mismatch as cross-compiled on 64-bit kernel %d %d %d %d\n", res->orig_sz , res->new_sz, btf_kind(orig_t), btf_kind(new_t));
+			goto done;
 
 			/* There are two use cases in which it's safe to
 			 * adjust load/store's mem size:
