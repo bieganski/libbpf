@@ -265,7 +265,12 @@ static bool symbol_match(struct elf_sym_iter *iter, int sh_type, struct elf_sym 
  */
 static unsigned long elf_sym_offset(struct elf_sym *sym)
 {
-	return sym->sym.st_value - sym->sh.sh_addr + sym->sh.sh_offset;
+	unsigned long res = sym->sym.st_value - sym->sh.sh_addr + sym->sh.sh_offset;
+#ifdef __arm__
+    // handle thumb addressing mode
+	res &= ~1;
+#endif
+	return res;
 }
 
 /* Find offset of function name in the provided ELF object. "binary_path" is

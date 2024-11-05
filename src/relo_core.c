@@ -916,9 +916,6 @@ static int bpf_core_calc_relo(const char *prog_name,
 			orig_t = btf_type_by_id(local_spec->btf, res->orig_type_id);
 			new_t = btf_type_by_id(targ_spec->btf, res->new_type_id);
 
-			printf("MATEUSZ: size mismatch as cross-compiled on 64-bit kernel %d %d %d %d\n", res->orig_sz , res->new_sz, btf_kind(orig_t), btf_kind(new_t));
-			goto done;
-
 			/* There are two use cases in which it's safe to
 			 * adjust load/store's mem size:
 			 *   - reading a 32-bit kernel pointer, while on BPF
@@ -939,6 +936,10 @@ static int bpf_core_calc_relo(const char *prog_name,
 			    btf_int_encoding(orig_t) != BTF_INT_SIGNED &&
 			    btf_int_encoding(new_t) != BTF_INT_SIGNED)
 				goto done;
+			
+
+			printf("MATEUSZ: size mismatch as cross-compiled on 64-bit kernel %d %d %d %d\n", res->orig_sz , res->new_sz, btf_kind(orig_t), btf_kind(new_t));
+			goto done;
 
 			/* mark as invalid mem size adjustment, but this will
 			 * only be checked for LDX/STX/ST insns
