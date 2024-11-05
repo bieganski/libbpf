@@ -22,7 +22,7 @@ int probe_fd(int fd)
 
 static int probe_kern_prog_name(int token_fd)
 {
-	const size_t attr_sz = offsetofend(union bpf_attr, prog_name);
+	const size_t attr_sz = offsetofend(union bpf_attr, prog_token_fd);
 	struct bpf_insn insns[] = {
 		BPF_MOV64_IMM(BPF_REG_0, 0),
 		BPF_EXIT_INSN(),
@@ -139,6 +139,25 @@ static int probe_kern_btf_datasec(int token_fd)
 		BTF_TYPE_ENC(1, BTF_INFO_ENC(BTF_KIND_VAR, 0, 0), 1),
 		BTF_VAR_STATIC,
 		/* DATASEC val */                               /* [3] */
+		BTF_TYPE_ENC(3, BTF_INFO_ENC(BTF_KIND_DATASEC, 0, 1), 4),
+		BTF_VAR_SECINFO_ENC(2, 0, 4),
+	};
+
+	return probe_fd(libbpf__load_raw_btf((char *)types, sizeof(types),
+					     strs, sizeof(strs), token_fd));
+}
+
+static int probe_kern_btf_qmark_datasec(int token_fd)
+{
+	static const char strs[] = "\0x\0?.data";
+	/* static int a; */
+	__u32 types[] = {
+		/* int */
+		BTF_TYPE_INT_ENC(0, BTF_INT_SIGNED, 0, 32, 4),  /* [1] */
+		/* VAR x */                                     /* [2] */
+		BTF_TYPE_ENC(1, BTF_INFO_ENC(BTF_KIND_VAR, 0, 0), 1),
+		BTF_VAR_STATIC,
+		/* DATASEC ?.data */                            /* [3] */
 		BTF_TYPE_ENC(3, BTF_INFO_ENC(BTF_KIND_DATASEC, 0, 1), 4),
 		BTF_VAR_SECINFO_ENC(2, 0, 4),
 	};
@@ -373,11 +392,41 @@ static int probe_uprobe_multi_link(int token_fd)
 	link_fd = bpf_link_create(prog_fd, -1, BPF_TRACE_UPROBE_MULTI, &link_opts);
 	err = -errno; /* close() can clobber errno */
 
+	if (link_fd >= 0 || err != -EBADF) {
+		if (link_fd >= 0)
+			close(link_fd);
+		close(prog_fd);
+		return 0;
+	}
+
+	/* Initial multi-uprobe support in kernel didn't handle PID filtering
+	 * correctly (it was doing thread filtering, not process filtering).
+	 * So now we'll detect if PID filtering logic was fixed, and, if not,
+	 * we'll pretend multi-uprobes are not supported, if not.
+	 * Multi-uprobes are used in USDT attachment logic, and we need to be
+	 * conservative here, because multi-uprobe selection happens early at
+	 * load time, while the use of PID filtering is known late at
+	 * attachment time, at which point it's too late to undo multi-uprobe
+	 * selection.
+	 *
+	 * Creating uprobe with pid == -1 for (invalid) '/' binary will fail
+	 * early with -EINVAL on kernels with fixed PID filtering logic;
+	 * otherwise -ESRCH would be returned if passed correct binary path
+	 * (but we'll just get -BADF, of course).
+	 */
+	link_opts.uprobe_multi.pid = -1; /* invalid PID */
+	link_opts.uprobe_multi.path = "/"; /* invalid path */
+	link_opts.uprobe_multi.offsets = &offset;
+	link_opts.uprobe_multi.cnt = 1;
+
+	link_fd = bpf_link_create(prog_fd, -1, BPF_TRACE_UPROBE_MULTI, &link_opts);
+	err = -errno; /* close() can clobber errno */
+
 	if (link_fd >= 0)
 		close(link_fd);
 	close(prog_fd);
 
-	return link_fd < 0 && err == -EBADF;
+	return link_fd < 0 && err == -EINVAL;
 }
 
 static int probe_kern_bpf_cookie(int token_fd)
@@ -405,6 +454,61 @@ static int probe_kern_btf_enum64(int token_fd)
 
 	return probe_fd(libbpf__load_raw_btf((char *)types, sizeof(types),
 					     strs, sizeof(strs), token_fd));
+}
+
+static int probe_kern_arg_ctx_tag(int token_fd)
+{
+	static const char strs[] = "\0a\0b\0arg:ctx\0";
+	const __u32 types[] = {
+		/* [1] INT */
+		BTF_TYPE_INT_ENC(1 /* "a" */, BTF_INT_SIGNED, 0, 32, 4),
+		/* [2] PTR -> VOID */
+		BTF_TYPE_ENC(0, BTF_INFO_ENC(BTF_KIND_PTR, 0, 0), 0),
+		/* [3] FUNC_PROTO `int(void *a)` */
+		BTF_TYPE_ENC(0, BTF_INFO_ENC(BTF_KIND_FUNC_PROTO, 0, 1), 1),
+		BTF_PARAM_ENC(1 /* "a" */, 2),
+		/* [4] FUNC 'a' -> FUNC_PROTO (main prog) */
+		BTF_TYPE_ENC(1 /* "a" */, BTF_INFO_ENC(BTF_KIND_FUNC, 0, BTF_FUNC_GLOBAL), 3),
+		/* [5] FUNC_PROTO `int(void *b __arg_ctx)` */
+		BTF_TYPE_ENC(0, BTF_INFO_ENC(BTF_KIND_FUNC_PROTO, 0, 1), 1),
+		BTF_PARAM_ENC(3 /* "b" */, 2),
+		/* [6] FUNC 'b' -> FUNC_PROTO (subprog) */
+		BTF_TYPE_ENC(3 /* "b" */, BTF_INFO_ENC(BTF_KIND_FUNC, 0, BTF_FUNC_GLOBAL), 5),
+		/* [7] DECL_TAG 'arg:ctx' -> func 'b' arg 'b' */
+		BTF_TYPE_DECL_TAG_ENC(5 /* "arg:ctx" */, 6, 0),
+	};
+	const struct bpf_insn insns[] = {
+		/* main prog */
+		BPF_CALL_REL(+1),
+		BPF_EXIT_INSN(),
+		/* global subprog */
+		BPF_EMIT_CALL(BPF_FUNC_get_func_ip), /* needs PTR_TO_CTX */
+		BPF_EXIT_INSN(),
+	};
+	const struct bpf_func_info_min func_infos[] = {
+		{ 0, 4 }, /* main prog -> FUNC 'a' */
+		{ 2, 6 }, /* subprog -> FUNC 'b' */
+	};
+	LIBBPF_OPTS(bpf_prog_load_opts, opts,
+		.token_fd = token_fd,
+		.prog_flags = token_fd ? BPF_F_TOKEN_FD : 0,
+	);
+	int prog_fd, btf_fd, insn_cnt = ARRAY_SIZE(insns);
+
+	btf_fd = libbpf__load_raw_btf((char *)types, sizeof(types), strs, sizeof(strs), token_fd);
+	if (btf_fd < 0)
+		return 0;
+
+	opts.prog_btf_fd = btf_fd;
+	opts.func_info = &func_infos;
+	opts.func_info_cnt = ARRAY_SIZE(func_infos);
+	opts.func_info_rec_size = sizeof(func_infos[0]);
+
+	prog_fd = bpf_prog_load(BPF_PROG_TYPE_KPROBE, "det_arg_ctx",
+				"GPL", insns, insn_cnt, &opts);
+	close(btf_fd);
+
+	return probe_fd(prog_fd);
 }
 
 typedef int (*feature_probe_fn)(int /* token_fd */);
@@ -475,6 +579,12 @@ static struct kern_feature_desc {
 	},
 	[FEAT_UPROBE_MULTI_LINK] = {
 		"BPF multi-uprobe link support", probe_uprobe_multi_link,
+	},
+	[FEAT_ARG_CTX_TAG] = {
+		"kernel-side __arg_ctx tag", probe_kern_arg_ctx_tag,
+	},
+	[FEAT_BTF_QMARK_DATASEC] = {
+		"BTF DATASEC names starting from '?'", probe_kern_btf_qmark_datasec,
 	},
 };
 

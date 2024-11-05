@@ -1,9 +1,9 @@
 name: pahole-staging
 
 on:
+  workflow_dispatch:
   schedule:
     - cron:  '0 18 * * *'
-
 
 jobs:
   vmtest:
@@ -12,7 +12,7 @@ jobs:
     env:
       STAGING: tmp.master
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/vmtest
         with:
